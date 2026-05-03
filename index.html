@@ -1,0 +1,1704 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Alpha Clinic — Pakistan's premier dental clinic delivering world-class care with compassion and precision." />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' https: data: blob:; script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://wa.me; frame-src https://www.google.com;" />
+  <title>Alpha Clinic — Dental Excellence</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦷</text></svg>" />
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Supabase JS -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect, useCallback, useRef, useMemo } = React;
+
+    // ─── SUPABASE CONFIG ─────────────────────────────────────────────────────────
+    // 🔧 REPLACE THESE WITH YOUR ACTUAL SUPABASE CREDENTIALS
+    const SUPABASE_URL = "https://YOUR_PROJECT_ID.supabase.co";
+    const SUPABASE_ANON_KEY = "YOUR_ANON_KEY_HERE";
+
+    let supabaseClient = null;
+    try {
+      if (SUPABASE_URL !== "https://YOUR_PROJECT_ID.supabase.co") {
+        supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+      }
+    } catch(e) { console.warn("Supabase not configured:", e); }
+
+    const DB_MODE = !!supabaseClient; // true = real DB, false = localStorage fallback
+
+    // ─── CONSTANTS ───────────────────────────────────────────────────────────────
+    const WHATSAPP_NUMBER = "923148433928";
+    const SESSION_DURATION_MS = 2 * 60 * 60 * 1000;
+    const MAX_LOGIN_ATTEMPTS = 5;
+    const LOCKOUT_DURATION_MS = 5 * 60 * 1000; // 5 minutes
+    // SHA-256 of "alphaclinic2024"
+    const ADMIN_PASS_HASH = "14d25a59e9d7f27d680951bd42376b3f16fc793ab89933af105a46441b2a35e2";
+
+    const DEFAULT_SERVICES = [
+      { id:"whitening", icon:"✦", title:"Teeth Whitening", tagline:"Radiant Smile in One Session", desc:"Professional-grade whitening removes years of stains — coffee, tea, tobacco — revealing a brighter, more confident smile.", duration:"60 min", price:"PKR 8,000", color:"#d4f0d4" },
+      { id:"checkup",   icon:"◈", title:"Full Check-Up",   tagline:"Prevention is the Best Treatment", desc:"Comprehensive oral exam including X-rays, gum health assessment, and a personalised care plan by our specialists.", duration:"45 min", price:"PKR 2,500", color:"#c8e6c9" },
+      { id:"transplant",icon:"◉", title:"Teeth Transplant", tagline:"Restore, Rebuild, Revive", desc:"State-of-the-art implant procedures that look, feel, and function exactly like natural teeth — for life.", duration:"90–120 min", price:"From PKR 45,000", color:"#b2dfdb" },
+      { id:"cleaning",  icon:"◇", title:"Deep Cleaning",   tagline:"A Foundation of Health", desc:"Ultrasonic scaling and polishing that removes tartar buildup and restores the natural lustre of your teeth.", duration:"50 min", price:"PKR 3,500", color:"#dcedc8" },
+      { id:"braces",    icon:"⊞", title:"Braces & Aligners", tagline:"The Perfect Alignment", desc:"Traditional braces or near-invisible clear aligners — we guide your smile to perfection with precision orthodontics.", duration:"Ongoing", price:"From PKR 35,000", color:"#f0f4c3" },
+      { id:"root",      icon:"⊕", title:"Root Canal",      tagline:"Pain-Free. Precise. Permanent.", desc:"Modern rotary root canal therapy — virtually painless, saving your natural tooth while eliminating infection for good.", duration:"75 min", price:"PKR 12,000", color:"#e8f5e9" },
+    ];
+
+    const DEFAULT_TIME_SLOTS = [
+      "09:00 AM","09:30 AM","10:00 AM","10:30 AM","11:00 AM","11:30 AM",
+      "12:00 PM","12:30 PM","02:00 PM","02:30 PM","03:00 PM","03:30 PM",
+      "04:00 PM","04:30 PM","05:00 PM",
+    ];
+
+    // ─── SECURITY UTILS ──────────────────────────────────────────────────────────
+    async function sha256(str) {
+      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+      return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,"0")).join("");
+    }
+
+    // Input sanitization — strip HTML tags
+    function sanitize(str) {
+      if (typeof str !== "string") return "";
+      return str.replace(/<[^>]*>/g, "").replace(/[<>"'&]/g, c => ({
+        '<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#x27;','&':'&amp;'
+      })[c]).trim().slice(0, 500);
+    }
+
+    // Phone validation for Pakistan numbers
+    function isValidPhone(p) {
+      const cleaned = p.replace(/[\s\-()]/g,"");
+      return /^(\+92|0092|92|0)?3[0-9]{9}$/.test(cleaned);
+    }
+
+    function isValidEmail(e) {
+      if (!e) return true; // optional
+      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e) && e.length < 255;
+    }
+
+    // Rate limiting state (in-memory + localStorage backup)
+    function getLockout() {
+      try { return JSON.parse(localStorage.getItem("ac_lockout") || "null"); } catch { return null; }
+    }
+    function saveLockout(data) { localStorage.setItem("ac_lockout", JSON.stringify(data)); }
+    function clearLockout() { localStorage.removeItem("ac_lockout"); }
+
+    // ─── DATA LAYER ──────────────────────────────────────────────────────────────
+    // Dual-mode: Supabase if configured, localStorage fallback otherwise
+
+    function getLocalServices() {
+      try { const r = localStorage.getItem("ac_services"); return r ? JSON.parse(r) : DEFAULT_SERVICES; } catch { return DEFAULT_SERVICES; }
+    }
+    function saveLocalServices(a) { localStorage.setItem("ac_services", JSON.stringify(a)); }
+
+    function getLocalTimeSlots() {
+      try { const r = localStorage.getItem("ac_timeslots"); return r ? JSON.parse(r) : DEFAULT_TIME_SLOTS; } catch { return DEFAULT_TIME_SLOTS; }
+    }
+    function saveLocalTimeSlots(a) { localStorage.setItem("ac_timeslots", JSON.stringify(a)); }
+
+    let _localAppts = (() => {
+      try { return JSON.parse(localStorage.getItem("ac_appts") || "[]"); } catch { return []; }
+    })();
+    function getLocalAppts() { return _localAppts; }
+    function saveLocalAppts(arr) { _localAppts = arr; localStorage.setItem("ac_appts", JSON.stringify(arr)); }
+
+    // Supabase data functions
+    async function dbGetAppointments() {
+      if (!supabaseClient) return getLocalAppts();
+      const { data, error } = await supabaseClient.from("appointments").select("*").order("created_at", { ascending: false });
+      if (error) { console.error(error); return getLocalAppts(); }
+      return data.map(r => ({
+        id: r.id, name: r.name, phone: r.phone, email: r.email || "",
+        notes: r.notes || "", date: r.date, time: r.time,
+        service: r.service || "", createdAt: r.created_at, status: r.status || "confirmed"
+      }));
+    }
+
+    async function dbSaveAppointment(appt) {
+      if (!supabaseClient) {
+        const updated = [...getLocalAppts(), appt];
+        saveLocalAppts(updated);
+        return { ok: true };
+      }
+      const { error } = await supabaseClient.from("appointments").insert({
+        id: appt.id, name: appt.name, phone: appt.phone, email: appt.email || null,
+        notes: appt.notes || null, date: appt.date, time: appt.time,
+        service: appt.service || null, created_at: appt.createdAt, status: appt.status
+      });
+      if (error) { console.error(error); return { ok: false, error }; }
+      return { ok: true };
+    }
+
+    async function dbDeleteAppointment(id) {
+      if (!supabaseClient) {
+        saveLocalAppts(getLocalAppts().filter(a => a.id !== id));
+        return { ok: true };
+      }
+      const { error } = await supabaseClient.from("appointments").delete().eq("id", id);
+      if (error) { console.error(error); return { ok: false }; }
+      return { ok: true };
+    }
+
+    async function dbUpdateAppointmentStatus(id, status) {
+      if (!supabaseClient) {
+        const updated = getLocalAppts().map(a => a.id === id ? { ...a, status } : a);
+        saveLocalAppts(updated);
+        return { ok: true };
+      }
+      const { error } = await supabaseClient.from("appointments").update({ status }).eq("id", id);
+      if (error) { console.error(error); return { ok: false }; }
+      return { ok: true };
+    }
+
+    // Session management
+    function getSession() {
+      try {
+        const raw = localStorage.getItem("ac_session");
+        if (!raw) return null;
+        const s = JSON.parse(raw);
+        if (!s?.token || !s?.expiry) return null;
+        if (Date.now() > s.expiry) { clearSession(); return null; }
+        return s;
+      } catch { return null; }
+    }
+    function setSession() {
+      const s = { token: crypto.randomUUID(), expiry: Date.now() + SESSION_DURATION_MS, created: Date.now() };
+      localStorage.setItem("ac_session", JSON.stringify(s));
+      return s;
+    }
+    function clearSession() { localStorage.removeItem("ac_session"); }
+
+    // ─── HELPERS ─────────────────────────────────────────────────────────────────
+    const todayStr = () => new Date().toISOString().split("T")[0];
+    const formatDate = (s) => new Date(s + "T00:00:00").toLocaleDateString("en-PK", { weekday:"long", year:"numeric", month:"long", day:"numeric" });
+    const getDaysInMonth = (y, m) => new Date(y, m + 1, 0).getDate();
+    const getFirstDayOfMonth = (y, m) => new Date(y, m, 1).getDay();
+    function isValidTimeSlot(s) { return /^(0?[1-9]|1[0-2]):[0-5][0-9] (AM|PM)$/.test(s.trim()); }
+
+    // ─── CSS ─────────────────────────────────────────────────────────────────────
+    const css = `
+      @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500&display=swap');
+
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+      :root {
+        --g: #1a6b3c; --g2: #2d9b5a; --g3: #e8f5ee; --g4: #c8e6d4;
+        --w: #ffffff; --off: #f7faf8; --text: #1a2e22; --muted: #5a7a65;
+        --border: #d0e8d8; --red: #c62828; --red-bg: #ffebee;
+        --amber: #b45309; --amber-bg: #fffbeb;
+        --shadow: 0 8px 40px rgba(26,107,60,0.08);
+        --shadow-lg: 0 20px 80px rgba(26,107,60,0.15);
+        --r: 16px; --r-lg: 24px;
+        --font-display: 'Cormorant Garamond', serif;
+        --font-body: 'DM Sans', sans-serif;
+        --nav-h: 64px;
+      }
+
+      html { scroll-behavior: smooth; }
+      body { font-family:var(--font-body); color:var(--text); background:var(--w); overflow-x:hidden; line-height:1.6; -webkit-font-smoothing:antialiased; }
+
+      /* NAV */
+      .nav { position:fixed; top:0; left:0; right:0; z-index:200; height:var(--nav-h); display:flex; align-items:center; justify-content:space-between; padding:0 20px; background:rgba(255,255,255,0.96); backdrop-filter:blur(24px); border-bottom:1px solid var(--border); transition:box-shadow .3s; }
+      .nav.scrolled { box-shadow:0 2px 20px rgba(26,107,60,0.1); }
+      .nav-logo { font-family:var(--font-display); font-size:1.45rem; font-weight:600; color:var(--g); letter-spacing:-.02em; cursor:pointer; flex-shrink:0; line-height:1; }
+      .nav-logo span { color:var(--g2); font-style:italic; }
+      .nav-links { display:flex; gap:28px; align-items:center; }
+      .nav-link { font-size:.8rem; font-weight:500; letter-spacing:.06em; color:var(--muted); cursor:pointer; border:none; background:none; text-transform:uppercase; font-family:var(--font-body); transition:color .2s; padding:4px 0; position:relative; }
+      .nav-link::after { content:''; position:absolute; bottom:-2px; left:0; right:0; height:1.5px; background:var(--g); transform:scaleX(0); transform-origin:left; transition:transform .25s; }
+      .nav-link:hover, .nav-link.active { color:var(--g); }
+      .nav-link.active::after, .nav-link:hover::after { transform:scaleX(1); }
+      .nav-cta { background:var(--g); color:#fff; border:none; cursor:pointer; padding:9px 20px; border-radius:100px; font-size:.8rem; font-weight:500; font-family:var(--font-body); transition:background .2s, transform .15s; letter-spacing:.03em; white-space:nowrap; }
+      .nav-cta:hover { background:var(--g2); transform:translateY(-1px); }
+      .nav-hamburger { display:none; flex-direction:column; gap:5px; cursor:pointer; background:none; border:none; padding:4px; }
+      .nav-hamburger span { display:block; width:22px; height:2px; background:var(--text); border-radius:2px; transition:all .25s; }
+      .nav-hamburger.open span:nth-child(1) { transform:rotate(45deg) translate(5px,5px); }
+      .nav-hamburger.open span:nth-child(2) { opacity:0; transform:scaleX(0); }
+      .nav-hamburger.open span:nth-child(3) { transform:rotate(-45deg) translate(5px,-5px); }
+      .nav-mobile-menu { display:none; position:fixed; top:var(--nav-h); left:0; right:0; z-index:190; background:rgba(255,255,255,0.98); backdrop-filter:blur(24px); border-bottom:1px solid var(--border); padding:12px 0 20px; box-shadow:0 8px 40px rgba(26,107,60,0.12); transform:translateY(-8px); opacity:0; pointer-events:none; transition:all .25s cubic-bezier(.4,0,.2,1); }
+      .nav-mobile-menu.open { transform:translateY(0); opacity:1; pointer-events:all; }
+      .nav-mobile-link { display:block; width:100%; text-align:left; padding:14px 24px; border:none; background:none; font-family:var(--font-body); font-size:.95rem; font-weight:500; color:var(--text); cursor:pointer; transition:background .15s, color .15s; }
+      .nav-mobile-link:hover, .nav-mobile-link.active { color:var(--g); background:var(--g3); }
+      .nav-mobile-cta { margin:10px 24px 0; display:block; text-align:center; background:var(--g); color:#fff; border:none; cursor:pointer; padding:14px; border-radius:12px; font-family:var(--font-body); font-size:.95rem; font-weight:500; }
+
+      /* HERO */
+      .hero { min-height:100svh; display:flex; align-items:center; background:linear-gradient(135deg,#f0faf4 0%,#e8f5ee 40%,#d4ede0 100%); padding:calc(var(--nav-h) + 48px) 20px 60px; position:relative; overflow:hidden; }
+      .hero::before { content:''; position:absolute; top:-20%; right:-10%; width:60vw; height:60vw; max-width:600px; max-height:600px; background:radial-gradient(circle,rgba(45,155,90,.12) 0%,transparent 70%); border-radius:50%; animation:pulse 6s ease-in-out infinite; }
+      .hero::after { content:''; position:absolute; bottom:-15%; left:-5%; width:50vw; height:50vw; max-width:500px; max-height:500px; background:radial-gradient(circle,rgba(26,107,60,.08) 0%,transparent 70%); border-radius:50%; animation:pulse 8s ease-in-out infinite reverse; }
+      @keyframes pulse { 0%,100%{transform:scale(1);opacity:1} 50%{transform:scale(1.1);opacity:.7} }
+      .hero-content { max-width:620px; position:relative; z-index:2; width:100%; }
+      .hero-badge { display:inline-flex; align-items:center; gap:8px; background:rgba(26,107,60,.1); color:var(--g); padding:6px 14px; border-radius:100px; font-size:.75rem; font-weight:500; letter-spacing:.06em; text-transform:uppercase; margin-bottom:24px; border:1px solid rgba(26,107,60,.15); }
+      .hero-badge::before { content:'●'; font-size:.55rem; animation:blink 2s infinite; }
+      @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+      .hero h1 { font-family:var(--font-display); font-size:clamp(2.6rem,9vw,5.5rem); font-weight:300; line-height:1.05; color:var(--text); margin-bottom:18px; letter-spacing:-.02em; }
+      .hero h1 em { color:var(--g); font-style:italic; }
+      .hero p { font-size:clamp(.95rem,2.5vw,1.1rem); color:var(--muted); max-width:440px; margin-bottom:32px; font-weight:300; line-height:1.8; }
+      .hero-actions { display:flex; gap:12px; flex-wrap:wrap; }
+      .hero-visual { position:absolute; right:4%; top:50%; transform:translateY(-50%); z-index:1; }
+      .tooth-3d { width:320px; height:320px; animation:float 4s ease-in-out infinite; filter:drop-shadow(0 24px 48px rgba(26,107,60,.2)); }
+      @keyframes float { 0%,100%{transform:translateY(0) rotate(-2deg)} 50%{transform:translateY(-18px) rotate(2deg)} }
+      .orbit-ring { position:absolute; border-radius:50%; border:1px solid rgba(45,155,90,.2); animation:spin 20s linear infinite; }
+      .orbit-ring:nth-child(1) { width:400px; height:400px; top:-40px; left:-40px; }
+      .orbit-ring:nth-child(2) { width:500px; height:500px; top:-90px; left:-90px; animation-duration:30s; animation-direction:reverse; border-color:rgba(26,107,60,.1); }
+      @keyframes spin { to{transform:rotate(360deg)} }
+      .orbit-dot { position:absolute; width:8px; height:8px; border-radius:50%; background:var(--g2); top:0; left:50%; transform:translateX(-50%); }
+      .hero-stats { display:flex; gap:24px; flex-wrap:wrap; margin-top:48px; padding-top:36px; border-top:1px solid var(--border); }
+      .stat-num { font-family:var(--font-display); font-size:2.2rem; font-weight:600; color:var(--g); line-height:1; }
+      .stat-label { font-size:.72rem; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin-top:3px; }
+
+      /* BUTTONS */
+      .btn-primary { background:var(--g); color:#fff; border:none; cursor:pointer; padding:14px 28px; border-radius:100px; font-size:.95rem; font-weight:500; font-family:var(--font-body); transition:all .25s; display:inline-flex; align-items:center; gap:8px; letter-spacing:.01em; white-space:nowrap; }
+      .btn-primary:hover { background:var(--g2); transform:translateY(-2px); box-shadow:0 10px 32px rgba(26,107,60,.28); }
+      .btn-primary:disabled { opacity:.5; cursor:not-allowed; transform:none; box-shadow:none; }
+      .btn-outline { background:transparent; color:var(--g); border:1.5px solid var(--g); cursor:pointer; padding:14px 28px; border-radius:100px; font-size:.95rem; font-weight:500; font-family:var(--font-body); transition:all .25s; white-space:nowrap; }
+      .btn-outline:hover { background:var(--g3); transform:translateY(-2px); }
+      .btn-danger { background:var(--red-bg); color:var(--red); border:1px solid #ffcdd2; cursor:pointer; padding:7px 14px; border-radius:8px; font-size:.78rem; font-weight:500; font-family:var(--font-body); transition:background .2s; }
+      .btn-danger:hover { background:#ffcdd2; }
+      .btn-amber { background:var(--amber-bg); color:var(--amber); border:1px solid #fde68a; cursor:pointer; padding:7px 14px; border-radius:8px; font-size:.78rem; font-weight:500; font-family:var(--font-body); transition:background .2s; }
+      .btn-amber:hover { background:#fde68a; }
+      .btn-success { background:#e8f5e9; color:#2e7d32; border:1px solid #c8e6c9; cursor:pointer; padding:7px 14px; border-radius:8px; font-size:.78rem; font-weight:500; font-family:var(--font-body); transition:background .2s; }
+      .btn-success:hover { background:#c8e6c9; }
+      .btn-sm { padding:8px 16px; font-size:.82rem; border-radius:8px; }
+
+      /* DB MODE BANNER */
+      .db-banner { position:fixed; bottom:16px; right:16px; z-index:300; padding:8px 16px; border-radius:100px; font-size:.72rem; font-weight:600; letter-spacing:.04em; display:flex; align-items:center; gap:6px; box-shadow:0 4px 16px rgba(0,0,0,.12); }
+      .db-banner.live { background:#1a6b3c; color:#fff; }
+      .db-banner.local { background:#fff3e0; color:#b45309; border:1px solid #fde68a; }
+      .db-dot { width:6px; height:6px; border-radius:50%; background:currentColor; animation:blink 1.5s infinite; }
+
+      /* SECTIONS */
+      section { padding:72px 20px; }
+      .section-badge { display:inline-block; font-size:.72rem; font-weight:500; letter-spacing:.1em; text-transform:uppercase; color:var(--g); margin-bottom:14px; }
+      .section-title { font-family:var(--font-display); font-size:clamp(1.9rem,5vw,3.2rem); font-weight:300; color:var(--text); line-height:1.1; margin-bottom:14px; letter-spacing:-.02em; }
+      .section-title em { color:var(--g); font-style:italic; }
+      .section-sub { color:var(--muted); font-weight:300; line-height:1.8; font-size:1rem; }
+
+      /* SERVICES */
+      .services-section { background:var(--off); }
+      .services-header { max-width:1200px; margin:0 auto 48px; }
+      .services-grid { max-width:1200px; margin:0 auto; display:grid; grid-template-columns:repeat(3,1fr); gap:20px; }
+      .service-card { background:var(--w); border-radius:var(--r-lg); padding:32px 28px; cursor:pointer; border:1px solid var(--border); transition:all .3s; position:relative; overflow:hidden; }
+      .service-card::before { content:''; position:absolute; top:0; left:0; right:0; height:3px; background:linear-gradient(90deg,var(--g),var(--g2)); transform:scaleX(0); transform-origin:left; transition:transform .3s; }
+      .service-card:hover { transform:translateY(-5px); box-shadow:var(--shadow-lg); }
+      .service-card:hover::before { transform:scaleX(1); }
+      .service-icon { width:52px; height:52px; border-radius:14px; display:flex; align-items:center; justify-content:center; font-size:1.3rem; margin-bottom:20px; color:var(--g); }
+      .service-card h3 { font-family:var(--font-display); font-size:1.4rem; font-weight:400; margin-bottom:6px; }
+      .service-tagline { font-size:.82rem; color:var(--g); font-weight:500; margin-bottom:14px; letter-spacing:.02em; }
+      .service-desc { color:var(--muted); font-size:.88rem; line-height:1.7; margin-bottom:24px; font-weight:300; }
+      .service-meta { display:flex; gap:10px; flex-wrap:wrap; }
+      .meta-pill { background:var(--g3); color:var(--g); padding:4px 12px; border-radius:100px; font-size:.75rem; font-weight:500; }
+
+      /* ABOUT */
+      .about-section { background:var(--w); }
+      .about-inner { max-width:1200px; margin:0 auto; display:grid; grid-template-columns:1fr 1fr; gap:64px; align-items:center; }
+      .about-visual { position:relative; border-radius:var(--r-lg); overflow:hidden; background:linear-gradient(135deg,var(--g3),var(--g4)); height:460px; display:flex; align-items:center; justify-content:center; }
+      .about-3d-inner { text-align:center; }
+      .big-tooth-icon { font-size:7rem; line-height:1; animation:float 5s ease-in-out infinite; }
+      .about-badges { position:absolute; bottom:20px; left:20px; right:20px; display:flex; gap:10px; }
+      .about-badge { flex:1; background:rgba(255,255,255,.9); backdrop-filter:blur(10px); border-radius:12px; padding:14px; text-align:center; }
+      .about-badge-num { font-family:var(--font-display); font-size:1.6rem; font-weight:600; color:var(--g); }
+      .about-badge-lbl { font-size:.7rem; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+      .feature-list { list-style:none; display:flex; flex-direction:column; gap:14px; }
+      .feature-item { display:flex; align-items:flex-start; gap:14px; }
+      .feature-check { width:24px; height:24px; border-radius:50%; background:var(--g3); color:var(--g); display:flex; align-items:center; justify-content:center; font-size:.7rem; flex-shrink:0; margin-top:2px; }
+      .feature-text h4 { font-size:.9rem; font-weight:500; margin-bottom:2px; }
+      .feature-text p { font-size:.83rem; color:var(--muted); font-weight:300; }
+
+      /* BOOKING */
+      .booking-section { background:linear-gradient(180deg,var(--off) 0%,var(--g3) 100%); }
+      .booking-inner { max-width:820px; margin:0 auto; }
+      .booking-header { text-align:center; margin-bottom:48px; }
+      .booking-card { background:var(--w); border-radius:var(--r-lg); padding:40px 36px; box-shadow:var(--shadow-lg); border:1px solid var(--border); }
+      .booking-steps { display:flex; gap:0; margin-bottom:40px; border-bottom:1px solid var(--border); padding-bottom:20px; }
+      .step { flex:1; display:flex; align-items:center; gap:10px; opacity:.4; transition:opacity .3s; }
+      .step.active { opacity:1; }
+      .step-num { width:30px; height:30px; border-radius:50%; background:var(--g3); color:var(--g); display:flex; align-items:center; justify-content:center; font-size:.78rem; font-weight:600; flex-shrink:0; }
+      .step.active .step-num { background:var(--g); color:#fff; }
+      .step-label { font-size:.8rem; font-weight:500; color:var(--text); }
+      .step-divider { flex:1; height:1px; background:var(--border); margin:0 8px; align-self:center; }
+
+      /* CALENDAR */
+      .cal-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }
+      .cal-month { font-family:var(--font-display); font-size:1.4rem; font-weight:400; color:var(--text); }
+      .cal-nav { background:var(--g3); border:none; cursor:pointer; width:36px; height:36px; border-radius:50%; color:var(--g); font-size:1rem; transition:background .2s; }
+      .cal-nav:hover { background:var(--g4); }
+      .cal-grid { display:grid; grid-template-columns:repeat(7,1fr); gap:4px; }
+      .cal-day-name { text-align:center; font-size:.72rem; font-weight:500; color:var(--muted); padding:8px 0; text-transform:uppercase; letter-spacing:.04em; }
+      .cal-day { text-align:center; padding:10px 4px; border-radius:10px; font-size:.88rem; cursor:pointer; transition:all .18s; border:1.5px solid transparent; color:var(--text); }
+      .cal-day:hover:not(.past):not(.empty) { background:var(--g3); border-color:var(--g4); }
+      .cal-day.today { font-weight:600; color:var(--g); border-color:var(--g4); }
+      .cal-day.selected { background:var(--g); color:#fff; border-color:var(--g); font-weight:600; }
+      .cal-day.past { opacity:.3; cursor:not-allowed; }
+      .cal-day.empty { cursor:default; }
+      .cal-day.has-appts::after { content:''; display:block; width:4px; height:4px; border-radius:50%; background:var(--g2); margin:2px auto 0; }
+      .cal-day.selected.has-appts::after { background:rgba(255,255,255,.7); }
+
+      /* TIME SLOTS */
+      .time-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:10px; }
+      .time-slot { padding:12px; border-radius:12px; border:1.5px solid var(--border); text-align:center; font-size:.88rem; cursor:pointer; transition:all .18s; font-weight:500; background:var(--w); color:var(--text); }
+      .time-slot:hover:not(.booked) { border-color:var(--g); color:var(--g); background:var(--g3); }
+      .time-slot.selected { background:var(--g); color:#fff; border-color:var(--g); }
+      .time-slot.booked { opacity:.35; cursor:not-allowed; text-decoration:line-through; }
+
+      /* FORMS */
+      .form-group { display:flex; flex-direction:column; gap:6px; }
+      .form-group.full { grid-column:1/-1; }
+      .form-label { font-size:.8rem; font-weight:500; color:var(--text); }
+      .form-label span { color:var(--red); margin-left:2px; }
+      .form-input { width:100%; padding:12px 16px; border:1.5px solid var(--border); border-radius:12px; font-family:var(--font-body); font-size:.95rem; color:var(--text); background:var(--w); transition:border-color .2s, box-shadow .2s; outline:none; }
+      .form-input:focus { border-color:var(--g); box-shadow:0 0 0 3px rgba(26,107,60,.1); }
+      .form-input.error { border-color:var(--red); }
+      .form-textarea { width:100%; padding:12px 16px; border:1.5px solid var(--border); border-radius:12px; font-family:var(--font-body); font-size:.95rem; color:var(--text); background:var(--w); transition:border-color .2s; outline:none; resize:vertical; min-height:80px; }
+      .form-textarea:focus { border-color:var(--g); box-shadow:0 0 0 3px rgba(26,107,60,.1); }
+      .form-hint { font-size:.75rem; color:var(--muted); margin-top:3px; }
+      .form-error { font-size:.75rem; color:var(--red); margin-top:3px; }
+      .form-grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+
+      /* BOOKING SUCCESS - PREMIUM ANIMATION */
+      .booking-success { text-align:center; padding:20px 0; animation:successReveal .6s cubic-bezier(.175,.885,.32,1.275) both; }
+      @keyframes successReveal { from{opacity:0;transform:scale(.85) translateY(20px)} to{opacity:1;transform:scale(1) translateY(0)} }
+      .success-icon { font-size:4rem; margin-bottom:16px; animation:successBounce .8s cubic-bezier(.175,.885,.32,1.275) .1s both; display:block; }
+      @keyframes successBounce { 0%{transform:scale(0) rotate(-30deg)} 60%{transform:scale(1.2) rotate(5deg)} 100%{transform:scale(1) rotate(0)} }
+      .booking-success h3 { font-family:var(--font-display); font-size:2rem; font-weight:400; margin-bottom:8px; color:var(--g); }
+      .appt-summary { background:var(--g3); border-radius:var(--r); padding:20px; margin:20px 0; text-align:left; border:1px solid var(--g4); }
+      .appt-summary-item { display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--g4); gap:12px; }
+      .appt-summary-item:last-child { border-bottom:none; }
+      .appt-summary-lbl { font-size:.8rem; color:var(--muted); font-weight:500; text-transform:uppercase; letter-spacing:.04em; flex-shrink:0; }
+      .appt-summary-val { font-size:.9rem; font-weight:500; text-align:right; }
+
+      /* CONFETTI CANVAS */
+      #confetti-canvas { position:fixed; top:0; left:0; width:100%; height:100%; pointer-events:none; z-index:9999; }
+
+      /* WHATSAPP BTN */
+      .whatsapp-btn { display:inline-flex; align-items:center; gap:12px; background:#25D366; color:#fff; padding:14px 22px; border-radius:14px; text-decoration:none; font-weight:500; font-size:.92rem; transition:all .25s; font-family:var(--font-body); width:100%; margin-bottom:12px; }
+      .whatsapp-btn:hover { background:#22c05d; transform:translateY(-2px); box-shadow:0 8px 24px rgba(37,211,102,.3); }
+
+      /* CONTACT */
+      .contact-section { background:var(--w); }
+      .contact-inner { max-width:1100px; margin:0 auto; display:grid; grid-template-columns:1fr 1fr; gap:60px; }
+      .contact-card { display:flex; align-items:flex-start; gap:16px; padding:20px; border-radius:var(--r); border:1px solid var(--border); margin-bottom:12px; transition:box-shadow .2s; }
+      .contact-card:hover { box-shadow:var(--shadow); }
+      .contact-icon { width:44px; height:44px; border-radius:12px; display:flex; align-items:center; justify-content:center; font-size:1.1rem; flex-shrink:0; }
+      .contact-detail h4 { font-weight:500; margin-bottom:4px; }
+      .contact-detail p { font-size:.85rem; color:var(--muted); font-weight:300; }
+      .map-container { border-radius:var(--r-lg); overflow:hidden; position:relative; height:300px; border:1px solid var(--border); }
+      .map-iframe { width:100%; height:100%; border:0; }
+      .map-overlay { position:absolute; bottom:12px; left:12px; background:rgba(255,255,255,.95); backdrop-filter:blur(10px); padding:8px 14px; border-radius:10px; font-size:.8rem; font-weight:500; box-shadow:var(--shadow); }
+
+      /* TOAST */
+      .toast { position:fixed; bottom:80px; left:50%; transform:translateX(-50%); background:var(--text); color:#fff; padding:12px 20px; border-radius:100px; font-size:.88rem; font-weight:500; z-index:500; white-space:nowrap; box-shadow:0 8px 32px rgba(0,0,0,.2); display:flex; align-items:center; gap:8px; animation:toastIn .3s cubic-bezier(.175,.885,.32,1.275); }
+      @keyframes toastIn { from{opacity:0;transform:translateX(-50%) translateY(20px)} to{opacity:1;transform:translateX(-50%) translateY(0)} }
+      .toast-icon { font-size:1rem; }
+
+      /* FOOTER */
+      footer { background:var(--text); color:rgba(255,255,255,.8); padding:60px 20px 32px; }
+      .footer-inner { max-width:1200px; margin:0 auto; }
+      .footer-top { display:grid; grid-template-columns:2fr 1fr 1fr; gap:48px; margin-bottom:40px; }
+      .footer-logo { font-family:var(--font-display); font-size:1.6rem; font-weight:600; color:#fff; margin-bottom:14px; }
+      .footer-logo span { color:var(--g2); font-style:italic; }
+      .footer-desc { font-size:.84rem; line-height:1.7; font-weight:300; color:rgba(255,255,255,.6); max-width:280px; }
+      .footer-top h4 { font-size:.78rem; text-transform:uppercase; letter-spacing:.1em; color:rgba(255,255,255,.5); margin-bottom:16px; font-weight:500; }
+      .footer-links { list-style:none; display:flex; flex-direction:column; gap:10px; }
+      .footer-links li { font-size:.85rem; color:rgba(255,255,255,.65); cursor:pointer; transition:color .2s; font-weight:300; }
+      .footer-links li:hover { color:#fff; }
+      .footer-bottom { border-top:1px solid rgba(255,255,255,.1); padding-top:24px; display:flex; justify-content:space-between; align-items:center; }
+      .footer-bottom p { font-size:.8rem; color:rgba(255,255,255,.4); }
+
+      /* ADMIN LOGIN */
+      .admin-login { min-height:100vh; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg,var(--g3),var(--g4)); padding:20px; }
+      .admin-login-card { background:var(--w); border-radius:var(--r-lg); padding:40px 36px; width:100%; max-width:400px; box-shadow:var(--shadow-lg); border:1px solid var(--border); }
+      .admin-login-card h2 { font-family:var(--font-display); font-size:1.8rem; font-weight:400; margin-bottom:6px; }
+      .admin-login-card p { color:var(--muted); font-size:.88rem; margin-bottom:28px; font-weight:300; }
+      .admin-error { color:var(--red); font-size:.82rem; margin-top:8px; display:flex; align-items:center; gap:4px; }
+      .lockout-bar { background:var(--red-bg); border:1px solid #ffcdd2; color:var(--red); padding:12px 16px; border-radius:10px; font-size:.85rem; margin-bottom:16px; }
+      .attempt-indicator { display:flex; gap:6px; justify-content:center; margin-top:10px; }
+      .attempt-dot { width:8px; height:8px; border-radius:50%; background:var(--border); transition:background .2s; }
+      .attempt-dot.used { background:var(--red); }
+
+      /* ADMIN PANEL */
+      .admin-panel { min-height:100vh; background:var(--off); }
+      .admin-bar { background:linear-gradient(135deg,var(--g),var(--g2)); color:#fff; padding:16px 20px; display:flex; flex-direction:column; gap:0; position:sticky; top:0; z-index:100; box-shadow:0 4px 20px rgba(26,107,60,.3); }
+      .admin-body { padding:24px 20px; max-width:1200px; margin:0 auto; }
+      .admin-stats { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:28px; }
+      .admin-stat-card { background:var(--w); border-radius:var(--r); padding:20px; border:1px solid var(--border); text-align:center; transition:transform .2s, box-shadow .2s; }
+      .admin-stat-card:hover { transform:translateY(-2px); box-shadow:var(--shadow); }
+      .admin-stat-num { font-family:var(--font-display); font-size:2rem; font-weight:600; color:var(--g); }
+      .admin-stat-lbl { font-size:.72rem; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; margin-top:4px; }
+      .session-badge { display:flex; align-items:center; gap:6px; background:rgba(255,255,255,.15); padding:6px 12px; border-radius:100px; font-size:.78rem; }
+      .session-dot { width:6px; height:6px; border-radius:50%; background:#4ade80; flex-shrink:0; animation:blink 2s infinite; }
+
+      /* ADMIN TABLE */
+      .admin-table-wrap { background:var(--w); border-radius:var(--r-lg); border:1px solid var(--border); overflow:hidden; margin-bottom:24px; }
+      .admin-table-head { padding:20px 24px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; border-bottom:1px solid var(--border); }
+      .admin-table-head h3 { font-family:var(--font-display); font-size:1.3rem; font-weight:400; }
+      table { width:100%; border-collapse:collapse; }
+      thead th { background:var(--off); padding:12px 16px; text-align:left; font-size:.72rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); font-weight:500; white-space:nowrap; }
+      tbody tr { border-bottom:1px solid var(--border); transition:background .15s; }
+      tbody tr:last-child { border-bottom:none; }
+      tbody tr:hover { background:var(--off); }
+      td { padding:14px 16px; font-size:.88rem; vertical-align:middle; }
+      .status-pill { display:inline-flex; align-items:center; gap:4px; padding:4px 10px; border-radius:100px; font-size:.72rem; font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+      .status-confirmed { background:#e8f5e9; color:#2e7d32; }
+      .status-pending { background:#fff3e0; color:#e65100; }
+      .status-cancelled { background:var(--red-bg); color:var(--red); }
+      .status-completed { background:#e3f2fd; color:#1565c0; }
+      .delete-btn { background:var(--red-bg); color:var(--red); border:1px solid #ffcdd2; border-radius:8px; padding:5px 10px; font-size:.75rem; font-weight:500; cursor:pointer; font-family:var(--font-body); transition:background .15s; }
+      .delete-btn:hover { background:#ffcdd2; }
+      .action-btns { display:flex; gap:4px; flex-wrap:wrap; }
+
+      /* CMS */
+      .cms-section { background:var(--w); border-radius:var(--r-lg); border:1px solid var(--border); overflow:hidden; margin-bottom:24px; }
+      .cms-section-head { padding:20px 24px; display:flex; justify-content:space-between; align-items:center; gap:12px; border-bottom:1px solid var(--border); }
+      .cms-section-head h3 { font-family:var(--font-display); font-size:1.25rem; font-weight:400; }
+      .cms-section-body { padding:24px; }
+      .cms-service-list { display:flex; flex-direction:column; gap:10px; margin-bottom:16px; }
+      .cms-service-item { display:flex; align-items:center; justify-content:space-between; padding:14px; border:1px solid var(--border); border-radius:12px; gap:12px; }
+      .cms-service-info { display:flex; align-items:center; gap:12px; min-width:0; }
+      .cms-service-icon { width:38px; height:38px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:1rem; flex-shrink:0; }
+      .cms-service-name { font-weight:500; font-size:.9rem; }
+      .cms-service-meta { font-size:.78rem; color:var(--muted); }
+      .cms-service-actions { display:flex; gap:6px; flex-shrink:0; }
+      .cms-form { background:var(--off); border-radius:var(--r); padding:24px; border:1px solid var(--border); margin-top:16px; }
+      .cms-form-title { font-weight:600; font-size:.9rem; margin-bottom:16px; }
+      .cms-form-grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+      .cms-form-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:16px; }
+      .slot-list { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:20px; }
+      .slot-chip { display:inline-flex; align-items:center; gap:6px; background:var(--g3); color:var(--g); padding:6px 12px; border-radius:100px; font-size:.82rem; font-weight:500; }
+      .slot-chip-remove { background:none; border:none; cursor:pointer; color:var(--g); font-size:.8rem; padding:0; line-height:1; opacity:.7; }
+      .slot-chip-remove:hover { opacity:1; }
+      .slot-add-row { display:flex; gap:10px; align-items:flex-start; }
+
+      /* SEARCH / FILTER */
+      .search-bar { padding:12px 16px; border:1.5px solid var(--border); border-radius:12px; font-family:var(--font-body); font-size:.9rem; outline:none; transition:border-color .2s; background:var(--w); }
+      .search-bar:focus { border-color:var(--g); }
+
+      /* SPINNER */
+      .spinner { width:20px; height:20px; border:2px solid rgba(255,255,255,.3); border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite; display:inline-block; vertical-align:middle; margin-right:8px; }
+      .spinner.dark { border-color:rgba(26,107,60,.2); border-top-color:var(--g); }
+
+      /* RESPONSIVE */
+      @media (max-width:768px) {
+        .nav-links { display:none; }
+        .nav-hamburger { display:flex; }
+        .nav-mobile-menu { display:block; }
+        .services-grid { grid-template-columns:1fr; }
+        .about-inner { grid-template-columns:1fr; }
+        .contact-inner { grid-template-columns:1fr; }
+        .footer-top { grid-template-columns:1fr; gap:32px; }
+        .booking-card { padding:24px 18px; }
+        .admin-stats { grid-template-columns:repeat(2,1fr); }
+        .cms-form-grid { grid-template-columns:1fr; }
+        .form-grid { grid-template-columns:1fr; }
+        .hero-visual { display:none; }
+        .hero-stats { gap:16px; }
+        .time-grid { grid-template-columns:repeat(auto-fill,minmax(90px,1fr)); }
+        .action-btns { flex-direction:column; }
+      }
+      @media (max-width:480px) {
+        .admin-stats { grid-template-columns:repeat(2,1fr); }
+        .booking-steps { gap:4px; }
+        .step-label { display:none; }
+      }
+    `;
+
+    // ─── SVG ASSETS ───────────────────────────────────────────────────────────────
+    const ToothSVG = () => (
+      <svg className="tooth-3d" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <ellipse cx="100" cy="60" rx="55" ry="45" fill="url(#tg1)" stroke="#b2dfdb" strokeWidth="1.5"/>
+        <path d="M60 90 Q50 140 55 180 Q60 200 70 195 Q80 165 100 155 Q120 165 130 195 Q140 200 145 180 Q150 140 140 90" fill="url(#tg2)" stroke="#b2dfdb" strokeWidth="1.5"/>
+        <ellipse cx="80" cy="52" rx="12" ry="8" fill="rgba(255,255,255,0.4)"/>
+        <defs>
+          <linearGradient id="tg1" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stopColor="#e8f5e9"/>
+            <stop offset="100%" stopColor="#b2dfdb"/>
+          </linearGradient>
+          <linearGradient id="tg2" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stopColor="#c8e6c9"/>
+            <stop offset="100%" stopColor="#80cbc4"/>
+          </linearGradient>
+        </defs>
+      </svg>
+    );
+
+    const WASvg = () => (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
+      </svg>
+    );
+
+    // ─── CONFETTI ─────────────────────────────────────────────────────────────────
+    function launchConfetti() {
+      const canvas = document.getElementById("confetti-canvas");
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+
+      const pieces = Array.from({ length: 120 }, () => ({
+        x: Math.random() * canvas.width,
+        y: -10 - Math.random() * 100,
+        r: 4 + Math.random() * 6,
+        d: Math.random() * 80,
+        color: ["#1a6b3c","#2d9b5a","#4ade80","#a7f3d0","#34d399","#86efac","#d4f0d4"][Math.floor(Math.random()*7)],
+        tilt: Math.random() * 10 - 10,
+        tiltAngle: 0,
+        tiltAngleInc: (Math.random() * 0.07) + 0.05,
+        opacity: 1,
+      }));
+
+      let frame = 0;
+      const maxFrames = 200;
+
+      function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        pieces.forEach(p => {
+          ctx.beginPath();
+          ctx.globalAlpha = p.opacity;
+          ctx.fillStyle = p.color;
+          ctx.ellipse(p.x, p.y, p.r, p.r * 0.5, p.tilt, 0, 2 * Math.PI);
+          ctx.fill();
+          p.tiltAngle += p.tiltAngleInc;
+          p.y += (Math.cos(p.d + frame * 0.02) + 3 + p.r / 2) * 0.8;
+          p.x += Math.sin(frame * 0.02) * 1.5;
+          p.tilt = Math.sin(p.tiltAngle) * 12;
+          if (frame > 100) p.opacity = Math.max(0, p.opacity - 0.015);
+        });
+        ctx.globalAlpha = 1;
+        frame++;
+        if (frame < maxFrames) requestAnimationFrame(draw);
+        else ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+      draw();
+    }
+
+    // ─── CALENDAR ─────────────────────────────────────────────────────────────────
+    const Calendar = ({ selectedDate, onSelect, bookedSlots }) => {
+      const today = new Date();
+      const [viewYear, setViewYear] = useState(today.getFullYear());
+      const [viewMonth, setViewMonth] = useState(today.getMonth());
+      const monthNames = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+      const days = getDaysInMonth(viewYear, viewMonth);
+      const firstDay = getFirstDayOfMonth(viewYear, viewMonth);
+      const todayISO = todayStr();
+
+      const prevMonth = () => { if (viewMonth === 0) { setViewMonth(11); setViewYear(y=>y-1); } else setViewMonth(m=>m-1); };
+      const nextMonth = () => { if (viewMonth === 11) { setViewMonth(0); setViewYear(y=>y+1); } else setViewMonth(m=>m+1); };
+
+      const cells = [];
+      for (let i = 0; i < firstDay; i++) cells.push(null);
+      for (let d = 1; d <= days; d++) cells.push(d);
+
+      return (
+        <div>
+          <div className="cal-header">
+            <button className="cal-nav" onClick={prevMonth}>‹</button>
+            <div className="cal-month">{monthNames[viewMonth]} {viewYear}</div>
+            <button className="cal-nav" onClick={nextMonth}>›</button>
+          </div>
+          <div className="cal-grid">
+            {["Su","Mo","Tu","We","Th","Fr","Sa"].map(d => (
+              <div key={d} className="cal-day-name">{d}</div>
+            ))}
+            {cells.map((day, i) => {
+              if (!day) return <div key={`e-${i}`} className="cal-day empty"/>;
+              const iso = `${viewYear}-${String(viewMonth+1).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
+              const isPast = iso < todayISO;
+              const isToday = iso === todayISO;
+              const isSelected = iso === selectedDate;
+              const hasAppts = bookedSlots[iso]?.length > 0;
+              return (
+                <div key={iso}
+                  className={`cal-day${isPast?" past":""}${isToday?" today":""}${isSelected?" selected":""}${hasAppts?" has-appts":""}`}
+                  onClick={() => !isPast && onSelect(iso)}
+                >{day}</div>
+              );
+            })}
+          </div>
+        </div>
+      );
+    };
+
+    // ─── ADMIN LOGIN ──────────────────────────────────────────────────────────────
+    const AdminLogin = ({ onSuccess }) => {
+      const [pass, setPass] = useState("");
+      const [err, setErr] = useState("");
+      const [loading, setLoading] = useState(false);
+      const [attempts, setAttempts] = useState(0);
+      const [lockoutUntil, setLockoutUntil] = useState(null);
+      const [timeLeft, setTimeLeft] = useState(0);
+      const [showPass, setShowPass] = useState(false);
+      const inputRef = useRef(null);
+
+      useEffect(() => {
+        const lockout = getLockout();
+        if (lockout && Date.now() < lockout.until) {
+          setLockoutUntil(lockout.until);
+          setAttempts(lockout.attempts);
+        } else if (lockout) {
+          clearLockout();
+        }
+        inputRef.current?.focus();
+      }, []);
+
+      useEffect(() => {
+        if (!lockoutUntil) return;
+        const tick = () => {
+          const left = Math.ceil((lockoutUntil - Date.now()) / 1000);
+          if (left <= 0) { setLockoutUntil(null); setAttempts(0); setErr(""); clearLockout(); }
+          else setTimeLeft(left);
+        };
+        tick();
+        const id = setInterval(tick, 500);
+        return () => clearInterval(id);
+      }, [lockoutUntil]);
+
+      const handleLogin = async () => {
+        if (lockoutUntil) return;
+        if (!pass.trim()) { setErr("Please enter your password."); return; }
+        setLoading(true); setErr("");
+        try {
+          const hash = await sha256(pass);
+          if (hash === ADMIN_PASS_HASH) {
+            clearLockout();
+            onSuccess(setSession());
+          } else {
+            const newAttempts = attempts + 1;
+            setAttempts(newAttempts);
+            setPass("");
+            if (newAttempts >= MAX_LOGIN_ATTEMPTS) {
+              const until = Date.now() + LOCKOUT_DURATION_MS;
+              setLockoutUntil(until);
+              saveLockout({ until, attempts: newAttempts });
+              setErr("");
+            } else {
+              const rem = MAX_LOGIN_ATTEMPTS - newAttempts;
+              setErr(`Incorrect password. ${rem} attempt${rem===1?"":"s"} remaining.`);
+              saveLockout({ until: null, attempts: newAttempts });
+            }
+          }
+        } catch { setErr("An error occurred. Please try again."); }
+        finally { setLoading(false); }
+      };
+
+      const isLocked = !!lockoutUntil;
+
+      return (
+        <div className="admin-login">
+          <div className="admin-login-card">
+            <div style={{ fontSize:"2.4rem", marginBottom:"14px" }}>🔐</div>
+            <h2>Staff Portal</h2>
+            <p>Alpha Clinic — Authorised personnel only</p>
+
+            {DB_MODE && (
+              <div style={{ background:"#e8f5e9", border:"1px solid #c8e6c9", borderRadius:10, padding:"10px 14px", fontSize:".8rem", color:"#2e7d32", marginBottom:16, display:"flex", gap:6, alignItems:"center" }}>
+                <span>🗄</span> Connected to live database
+              </div>
+            )}
+            {!DB_MODE && (
+              <div style={{ background:"#fff3e0", border:"1px solid #fde68a", borderRadius:10, padding:"10px 14px", fontSize:".8rem", color:"#b45309", marginBottom:16, display:"flex", gap:6, alignItems:"center" }}>
+                <span>⚠</span> Using local storage — configure Supabase for live data
+              </div>
+            )}
+
+            {isLocked && (
+              <div className="lockout-bar">
+                🔒 Too many failed attempts. Try again in <strong>{Math.floor(timeLeft/60)}:{String(timeLeft%60).padStart(2,"0")}</strong>
+              </div>
+            )}
+
+            <div style={{ position:"relative" }}>
+              <input
+                ref={inputRef}
+                className="form-input"
+                type={showPass ? "text" : "password"}
+                placeholder="Enter staff password"
+                value={pass}
+                onChange={e => setPass(e.target.value)}
+                onKeyDown={e => { if (e.key==="Enter") handleLogin(); }}
+                disabled={isLocked || loading}
+                style={{ width:"100%", marginBottom:"4px", paddingRight:48 }}
+                autoComplete="current-password"
+              />
+              <button onClick={() => setShowPass(s=>!s)}
+                style={{ position:"absolute", right:12, top:12, background:"none", border:"none", cursor:"pointer", color:"var(--muted)", fontSize:".9rem" }}>
+                {showPass ? "👁" : "👁‍🗨"}
+              </button>
+            </div>
+
+            {err && <p className="admin-error">⚠ {err}</p>}
+            {attempts > 0 && !isLocked && (
+              <div className="attempt-indicator">
+                {Array.from({ length: MAX_LOGIN_ATTEMPTS }).map((_, i) => (
+                  <div key={i} className={`attempt-dot${i < attempts ? " used" : ""}`}/>
+                ))}
+              </div>
+            )}
+
+            <button className="btn-primary" style={{ width:"100%", marginTop:16, justifyContent:"center" }}
+              onClick={handleLogin} disabled={isLocked || loading}>
+              {loading ? <><span className="spinner"/>Verifying…</> : "Login →"}
+            </button>
+            <button className="btn-outline" style={{ width:"100%", marginTop:10, justifyContent:"center" }}
+              onClick={() => window.history.back()}>
+              ← Back to Site
+            </button>
+            <p style={{ fontSize:".72rem", color:"var(--muted)", marginTop:16, lineHeight:1.5, textAlign:"center" }}>
+              Session expires automatically after 2 hours.
+            </p>
+          </div>
+        </div>
+      );
+    };
+
+    // ─── MANAGE SERVICES ─────────────────────────────────────────────────────────
+    const ICON_OPTIONS = ["✦","◈","◉","◇","⊞","⊕","◆","⬡","⬢","✿","⊗","⊙"];
+    const COLOR_OPTIONS = ["#d4f0d4","#c8e6c9","#b2dfdb","#dcedc8","#f0f4c3","#e8f5e9","#e3f2fd","#fce4ec","#fff3e0","#ede7f6"];
+    const EMPTY_SVC = { title:"", tagline:"", desc:"", duration:"", price:"", icon:"✦", color:"#d4f0d4" };
+
+    const ManageServices = ({ services, setServices, showToast }) => {
+      const [form, setForm] = useState(EMPTY_SVC);
+      const [editId, setEditId] = useState(null);
+      const [showForm, setShowForm] = useState(false);
+
+      const openAdd = () => { setForm(EMPTY_SVC); setEditId(null); setShowForm(true); };
+      const openEdit = s => { setForm({ title:s.title, tagline:s.tagline, desc:s.desc, duration:s.duration, price:s.price, icon:s.icon, color:s.color }); setEditId(s.id); setShowForm(true); };
+      const cancel = () => { setShowForm(false); setEditId(null); setForm(EMPTY_SVC); };
+
+      const save = () => {
+        if (!form.title.trim() || !form.price.trim()) { showToast("Title and price are required","⚠"); return; }
+        let updated;
+        if (editId) {
+          updated = services.map(s => s.id===editId ? { ...s, ...form } : s);
+          showToast("Service updated","✏️");
+        } else {
+          const id = form.title.toLowerCase().replace(/\s+/g,"_").replace(/[^a-z0-9_]/g,"") + "_" + Date.now();
+          updated = [...services, { id, ...form }];
+          showToast("Service added","✅");
+        }
+        saveLocalServices(updated);
+        setServices(updated);
+        cancel();
+      };
+
+      const remove = id => {
+        const updated = services.filter(s => s.id !== id);
+        saveLocalServices(updated);
+        setServices(updated);
+        showToast("Service removed","🗑");
+      };
+
+      return (
+        <div className="cms-section">
+          <div className="cms-section-head">
+            <h3>🗂 Manage Services</h3>
+            <div style={{ display:"flex", gap:8 }}>
+              <button className="btn-outline btn-sm" onClick={() => { saveLocalServices(DEFAULT_SERVICES); setServices(DEFAULT_SERVICES); showToast("Reset to defaults","↺"); }}>Reset</button>
+              <button className="btn-primary btn-sm" onClick={openAdd}>➕ Add Service</button>
+            </div>
+          </div>
+          <div className="cms-section-body">
+            <div className="cms-service-list">
+              {services.map(s => (
+                <div key={s.id} className="cms-service-item">
+                  <div className="cms-service-info">
+                    <div className="cms-service-icon" style={{ background:s.color }}>{s.icon}</div>
+                    <div>
+                      <div className="cms-service-name">{s.title}</div>
+                      <div className="cms-service-meta">{s.duration} · {s.price}</div>
+                    </div>
+                  </div>
+                  <div className="cms-service-actions">
+                    <button className="btn-outline btn-sm" onClick={() => openEdit(s)}>✏️ Edit</button>
+                    <button className="btn-danger btn-sm" onClick={() => remove(s.id)}>🗑</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {showForm && (
+              <div className="cms-form">
+                <div className="cms-form-title">{editId ? "✏️ Edit Service" : "➕ New Service"}</div>
+                <div className="cms-form-grid">
+                  <div className="form-group full">
+                    <label className="form-label">Title <span>*</span></label>
+                    <input className="form-input" placeholder="e.g. Teeth Whitening" value={form.title} onChange={e => setForm({ ...form, title:e.target.value })}/>
+                  </div>
+                  <div className="form-group full">
+                    <label className="form-label">Tagline</label>
+                    <input className="form-input" placeholder="Short catchy line" value={form.tagline} onChange={e => setForm({ ...form, tagline:e.target.value })}/>
+                  </div>
+                  <div className="form-group full">
+                    <label className="form-label">Description</label>
+                    <textarea className="form-textarea" placeholder="Brief description" value={form.desc} onChange={e => setForm({ ...form, desc:e.target.value })}/>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Duration</label>
+                    <input className="form-input" placeholder="e.g. 60 min" value={form.duration} onChange={e => setForm({ ...form, duration:e.target.value })}/>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Price <span>*</span></label>
+                    <input className="form-input" placeholder="e.g. PKR 8,000" value={form.price} onChange={e => setForm({ ...form, price:e.target.value })}/>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Icon</label>
+                    <div style={{ display:"flex", flexWrap:"wrap", gap:6, marginTop:4 }}>
+                      {ICON_OPTIONS.map(ic => (
+                        <button key={ic} onClick={() => setForm({ ...form, icon:ic })}
+                          style={{ width:34,height:34,borderRadius:8,border:form.icon===ic?"2px solid var(--g)":"1.5px solid var(--border)",background:form.icon===ic?"var(--g3)":"var(--w)",cursor:"pointer",fontSize:"1rem" }}>
+                          {ic}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Card Color</label>
+                    <div style={{ display:"flex", flexWrap:"wrap", gap:6, marginTop:4 }}>
+                      {COLOR_OPTIONS.map(c => (
+                        <button key={c} onClick={() => setForm({ ...form, color:c })}
+                          style={{ width:28,height:28,borderRadius:6,border:form.color===c?"2.5px solid var(--g)":"1.5px solid var(--border)",background:c,cursor:"pointer" }}>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                <div className="cms-form-actions">
+                  <button className="btn-outline btn-sm" onClick={cancel}>Cancel</button>
+                  <button className="btn-primary btn-sm" onClick={save}>{editId ? "Save Changes" : "Add Service"}</button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    // ─── MANAGE TIME SLOTS ────────────────────────────────────────────────────────
+    const ManageTimeSlots = ({ timeSlots, setTimeSlots, showToast }) => {
+      const [newSlot, setNewSlot] = useState("");
+      const [slotErr, setSlotErr] = useState("");
+
+      const addSlot = () => {
+        const s = newSlot.trim().toUpperCase();
+        if (!s) return;
+        if (!isValidTimeSlot(s)) { setSlotErr("Format: HH:MM AM or HH:MM PM (e.g. 09:00 AM)"); return; }
+        if (timeSlots.includes(s)) { setSlotErr("That slot already exists."); return; }
+        const toMin = t => { const [time,mer]=t.split(" "); let [h,m]=time.split(":").map(Number); if(mer==="PM"&&h!==12)h+=12; if(mer==="AM"&&h===12)h=0; return h*60+m; };
+        const updated = [...timeSlots, s].sort((a,b) => toMin(a)-toMin(b));
+        saveLocalTimeSlots(updated);
+        setTimeSlots(updated);
+        setNewSlot(""); setSlotErr("");
+        showToast(`${s} added`, "✅");
+      };
+
+      return (
+        <div className="cms-section">
+          <div className="cms-section-head">
+            <h3>🕐 Manage Time Slots</h3>
+            <button className="btn-outline btn-sm" onClick={() => { saveLocalTimeSlots(DEFAULT_TIME_SLOTS); setTimeSlots(DEFAULT_TIME_SLOTS); showToast("Reset to defaults","↺"); }}>Reset</button>
+          </div>
+          <div className="cms-section-body">
+            <p style={{ fontSize:".84rem", color:"var(--muted)", marginBottom:16 }}>{timeSlots.length} slot{timeSlots.length!==1?"s":""} available.</p>
+            <div className="slot-list">
+              {timeSlots.map(s => (
+                <div key={s} className="slot-chip">
+                  {s}
+                  <button className="slot-chip-remove" onClick={() => { const u=timeSlots.filter(t=>t!==s); saveLocalTimeSlots(u); setTimeSlots(u); showToast(`${s} removed`,"🗑"); }}>✕</button>
+                </div>
+              ))}
+            </div>
+            <div className="slot-add-row">
+              <div style={{ flex:1 }}>
+                <input className="form-input" placeholder="e.g. 06:00 PM" value={newSlot}
+                  onChange={e => { setNewSlot(e.target.value); setSlotErr(""); }}
+                  onKeyDown={e => { if(e.key==="Enter") addSlot(); }}/>
+                {slotErr && <p className="form-error">{slotErr}</p>}
+                <p className="form-hint">Format: HH:MM AM / HH:MM PM</p>
+              </div>
+              <button className="btn-primary btn-sm" style={{ height:48, alignSelf:"flex-start", borderRadius:12 }} onClick={addSlot}>Add</button>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // ─── ADMIN PANEL ──────────────────────────────────────────────────────────────
+    const AdminPanel = ({ session, onLogout, appointments, setAppointments, services, setServices, timeSlots, setTimeSlots, showToast, loadingAppts }) => {
+      const [activeTab, setActiveTab] = useState("bookings");
+      const [adminFilter, setAdminFilter] = useState("all");
+      const [search, setSearch] = useState("");
+      const [sessionTimeLeft, setSessionTimeLeft] = useState("");
+
+      useEffect(() => {
+        const tick = () => {
+          const ms = session.expiry - Date.now();
+          if (ms <= 0) { onLogout(); return; }
+          const h = Math.floor(ms/3600000);
+          const m = Math.floor((ms%3600000)/60000);
+          setSessionTimeLeft(h>0 ? `${h}h ${m}m` : `${m}m`);
+        };
+        tick();
+        const id = setInterval(tick, 30000);
+        return () => clearInterval(id);
+      }, [session, onLogout]);
+
+      const today = todayStr();
+      const todayAppts = appointments.filter(a => a.date === today);
+      const upcoming = appointments.filter(a => a.date >= today).sort((a,b) => a.date.localeCompare(b.date)||a.time.localeCompare(b.time));
+
+      const baseFiltered = adminFilter==="today" ? todayAppts
+        : adminFilter==="upcoming" ? upcoming
+        : [...appointments].sort((a,b) => (b.createdAt||"").localeCompare(a.createdAt||""));
+
+      const filtered = search.trim()
+        ? baseFiltered.filter(a => [a.name,a.phone,a.email,a.service].join(" ").toLowerCase().includes(search.toLowerCase()))
+        : baseFiltered;
+
+      const deleteAppt = async (id) => {
+        const { ok } = await dbDeleteAppointment(id);
+        if (ok) {
+          setAppointments(prev => prev.filter(a => a.id !== id));
+          showToast("Appointment removed","🗑");
+        } else {
+          showToast("Failed to delete. Please try again.","⚠");
+        }
+      };
+
+      const updateStatus = async (id, status) => {
+        const { ok } = await dbUpdateAppointmentStatus(id, status);
+        if (ok) {
+          setAppointments(prev => prev.map(a => a.id===id ? { ...a, status } : a));
+          showToast(`Status updated to ${status}`, "✅");
+        }
+      };
+
+      const tabs = [["bookings","📋 Bookings"],["services","🗂 Services"],["slots","🕐 Slots"]];
+
+      return (
+        <div className="admin-panel">
+          <div className="admin-bar">
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", width:"100%", gap:10 }}>
+              <h2 style={{ fontSize:"1.1rem", color:"#fff" }}>🦷 Alpha Clinic — Staff Portal</h2>
+              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                <div style={{ fontSize:".7rem", color:"rgba(255,255,255,.6)", background:"rgba(255,255,255,.1)", padding:"4px 10px", borderRadius:100 }}>
+                  {DB_MODE ? "🗄 Live DB" : "💾 Local"}
+                </div>
+                <div className="session-badge"><div className="session-dot"/><span>{sessionTimeLeft}</span></div>
+                <button onClick={onLogout}
+                  style={{ background:"#fff", color:"var(--g)", border:"none", cursor:"pointer", padding:"8px 18px", borderRadius:100, fontFamily:"var(--font-body)", fontSize:".85rem", fontWeight:600, whiteSpace:"nowrap" }}>
+                  Logout
+                </button>
+              </div>
+            </div>
+            <div style={{ display:"flex", gap:4, width:"100%", marginTop:10 }}>
+              {tabs.map(([id, label]) => (
+                <button key={id} onClick={() => setActiveTab(id)}
+                  style={{ flex:1, padding:"8px 4px", borderRadius:100, border:"none", cursor:"pointer", fontFamily:"var(--font-body)", fontSize:".78rem", fontWeight:500, background:activeTab===id?"rgba(255,255,255,0.9)":"rgba(255,255,255,0.15)", color:activeTab===id?"var(--g)":"rgba(255,255,255,0.85)", transition:"all .2s", whiteSpace:"nowrap" }}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="admin-body">
+            {activeTab === "bookings" && (
+              <>
+                <div className="admin-stats">
+                  {[
+                    { n: appointments.length, l:"Total Bookings", icon:"📋" },
+                    { n: todayAppts.length, l:"Today", icon:"📅" },
+                    { n: upcoming.length, l:"Upcoming", icon:"⏳" },
+                    { n: [...new Set(appointments.map(a=>a.phone))].length, l:"Unique Patients", icon:"👥" },
+                  ].map((s,i) => (
+                    <div key={i} className="admin-stat-card">
+                      <div style={{ fontSize:"1.4rem", marginBottom:6 }}>{s.icon}</div>
+                      <div className="admin-stat-num">{loadingAppts ? "…" : s.n}</div>
+                      <div className="admin-stat-lbl">{s.l}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="admin-table-wrap">
+                  <div className="admin-table-head">
+                    <h3>Appointments</h3>
+                    <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
+                      <input className="search-bar" placeholder="Search name, phone…" value={search}
+                        onChange={e => setSearch(e.target.value)} style={{ width:200 }}/>
+                      {["all","today","upcoming"].map(f => (
+                        <button key={f} onClick={() => setAdminFilter(f)}
+                          style={{ padding:"7px 14px", borderRadius:100, border:"1.5px solid", cursor:"pointer", fontFamily:"var(--font-body)", fontSize:".78rem", fontWeight:500, borderColor:adminFilter===f?"var(--g)":"var(--border)", background:adminFilter===f?"var(--g)":"var(--w)", color:adminFilter===f?"#fff":"var(--muted)" }}>
+                          {f.charAt(0).toUpperCase()+f.slice(1)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {loadingAppts ? (
+                    <div style={{ padding:52, textAlign:"center", color:"var(--muted)" }}>
+                      <span className="spinner dark"/>Loading appointments…
+                    </div>
+                  ) : filtered.length === 0 ? (
+                    <div style={{ padding:52, textAlign:"center", color:"var(--muted)" }}>
+                      <div style={{ fontSize:"2.2rem", marginBottom:10 }}>📋</div>
+                      <p>{search ? "No matching appointments." : "No appointments yet."}</p>
+                    </div>
+                  ) : (
+                    <div style={{ overflowX:"auto" }}>
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Patient</th><th>Service</th><th>Date</th><th>Time</th><th>Phone</th><th>Status</th><th>Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filtered.map(a => (
+                            <tr key={a.id}>
+                              <td>
+                                <div style={{ fontWeight:500 }}>{a.name}</div>
+                                {a.email && <div style={{ fontSize:".75rem", color:"var(--muted)" }}>{a.email}</div>}
+                                {a.notes && <div style={{ fontSize:".72rem", color:"var(--muted)", fontStyle:"italic", marginTop:2 }}>"{a.notes}"</div>}
+                              </td>
+                              <td>{a.service || "—"}</td>
+                              <td style={{ whiteSpace:"nowrap" }}>{formatDate(a.date)}</td>
+                              <td><strong>{a.time}</strong></td>
+                              <td><a href={`tel:${a.phone}`} style={{ color:"var(--g)", textDecoration:"none" }}>{a.phone}</a></td>
+                              <td>
+                                <select value={a.status}
+                                  onChange={e => updateStatus(a.id, e.target.value)}
+                                  style={{ border:"1.5px solid var(--border)", borderRadius:8, padding:"4px 8px", fontFamily:"var(--font-body)", fontSize:".78rem", cursor:"pointer", background:"var(--w)", outline:"none" }}>
+                                  <option value="confirmed">✅ Confirmed</option>
+                                  <option value="pending">⏳ Pending</option>
+                                  <option value="completed">🏁 Completed</option>
+                                  <option value="cancelled">❌ Cancelled</option>
+                                </select>
+                              </td>
+                              <td>
+                                <div className="action-btns">
+                                  <a href={`https://wa.me/${a.phone?.replace(/\D/g,"")}?text=Hi+${encodeURIComponent(a.name)}%2C+this+is+Alpha+Clinic+confirming+your+appointment+on+${encodeURIComponent(formatDate(a.date))}+at+${encodeURIComponent(a.time)}.`}
+                                    target="_blank" rel="noopener noreferrer"
+                                    style={{ display:"inline-flex", alignItems:"center", gap:4, padding:"5px 10px", borderRadius:8, background:"#e8f5e9", color:"#25D366", fontSize:".75rem", fontWeight:600, textDecoration:"none", border:"1px solid #c8e6c9" }}>
+                                    <WASvg/> WA
+                                  </a>
+                                  <button className="delete-btn" onClick={() => deleteAppt(a.id)}>Remove</button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  {!loadingAppts && filtered.length > 0 && (
+                    <div style={{ padding:"12px 24px", borderTop:"1px solid var(--border)", fontSize:".78rem", color:"var(--muted)" }}>
+                      Showing {filtered.length} of {appointments.length} appointment{appointments.length!==1?"s":""}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
+            {activeTab === "services" && (
+              <ManageServices services={services} setServices={setServices} showToast={showToast}/>
+            )}
+            {activeTab === "slots" && (
+              <ManageTimeSlots timeSlots={timeSlots} setTimeSlots={setTimeSlots} showToast={showToast}/>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    // ─── ROUTING ──────────────────────────────────────────────────────────────────
+    const VALID_PAGES = new Set(["home","services","book","contact","admin"]);
+    function pageFromPath() {
+      const seg = window.location.pathname.replace(/^\//,"").split("/")[0];
+      return VALID_PAGES.has(seg) ? seg : "home";
+    }
+
+    // ─── MAIN APP ─────────────────────────────────────────────────────────────────
+    function App() {
+      const [page, setPage] = useState(() => pageFromPath());
+      const [scrolled, setScrolled] = useState(false);
+      const [menuOpen, setMenuOpen] = useState(false);
+      const [toast, setToast] = useState(null);
+
+      const [services, setServices] = useState(() => getLocalServices());
+      const [timeSlots, setTimeSlots] = useState(() => getLocalTimeSlots());
+      const [appointments, setAppointments] = useState([]);
+      const [loadingAppts, setLoadingAppts] = useState(false);
+
+      const [session, setSessionState] = useState(() => getSession());
+
+      // Booking state
+      const [bookStep, setBookStep] = useState(1);
+      const [selDate, setSelDate] = useState("");
+      const [selTime, setSelTime] = useState("");
+      const [selService, setSelService] = useState("");
+      const [form, setForm] = useState({ name:"", phone:"", email:"", notes:"" });
+      const [formErrors, setFormErrors] = useState({});
+      const [bookingLoading, setBookingLoading] = useState(false);
+      const [lastAppt, setLastAppt] = useState(null);
+
+      // Load appointments (from DB or localStorage)
+      const loadAppointments = useCallback(async () => {
+        setLoadingAppts(true);
+        try {
+          const data = await dbGetAppointments();
+          setAppointments(data);
+        } catch(e) {
+          console.error(e);
+          setAppointments(getLocalAppts());
+        } finally {
+          setLoadingAppts(false);
+        }
+      }, []);
+
+      // Load appointments when admin panel is active
+      useEffect(() => {
+        if (page === "admin" && session) {
+          loadAppointments();
+        }
+      }, [page, session, loadAppointments]);
+
+      // For booking page, also load to check booked slots
+      useEffect(() => {
+        if (page === "book") loadAppointments();
+      }, [page, loadAppointments]);
+
+      useEffect(() => {
+        const s = () => setScrolled(window.scrollY > 20);
+        window.addEventListener("scroll", s);
+        return () => window.removeEventListener("scroll", s);
+      }, []);
+
+      useEffect(() => { setMenuOpen(false); }, [page]);
+
+      useEffect(() => {
+        const check = () => { if (page==="admin" && session && !getSession()) handleLogout(); };
+        window.addEventListener("focus", check);
+        return () => window.removeEventListener("focus", check);
+      }, [page, session]);
+
+      useEffect(() => {
+        const onPop = () => setPage(pageFromPath());
+        window.addEventListener("popstate", onPop);
+        return () => window.removeEventListener("popstate", onPop);
+      }, []);
+
+      const showToast = useCallback((msg, icon="✓") => {
+        setToast({ msg, icon });
+        setTimeout(() => setToast(null), 4000);
+      }, []);
+
+      const handleLogout = useCallback(() => {
+        clearSession();
+        setSessionState(null);
+        navTo("home");
+      }, []);
+
+      const navTo = (p) => {
+        window.history.pushState(null, "", p==="home"?"/":`/${p}`);
+        setPage(p);
+        window.scrollTo(0,0);
+      };
+
+      const bookedSlots = useMemo(() => appointments.reduce((acc,a) => {
+        if (!acc[a.date]) acc[a.date] = [];
+        acc[a.date].push(a.time);
+        return acc;
+      }, {}), [appointments]);
+
+      const isSlotBooked = (date, time) => bookedSlots[date]?.includes(time);
+
+      // Form validation
+      const validateForm = () => {
+        const errs = {};
+        if (!form.name.trim()) errs.name = "Full name is required.";
+        else if (form.name.trim().length < 2) errs.name = "Name must be at least 2 characters.";
+        if (!form.phone.trim()) errs.phone = "Phone number is required.";
+        else if (!isValidPhone(form.phone)) errs.phone = "Please enter a valid Pakistani mobile number.";
+        if (form.email && !isValidEmail(form.email)) errs.email = "Please enter a valid email address.";
+        setFormErrors(errs);
+        return Object.keys(errs).length === 0;
+      };
+
+      const handleBook = async () => {
+        if (!validateForm()) return;
+        setBookingLoading(true);
+
+        const appt = {
+          id: crypto.randomUUID(),
+          name: sanitize(form.name),
+          phone: sanitize(form.phone),
+          email: sanitize(form.email),
+          notes: sanitize(form.notes),
+          date: selDate,
+          time: selTime,
+          service: selService,
+          createdAt: new Date().toISOString(),
+          status: "confirmed",
+        };
+
+        const { ok, error } = await dbSaveAppointment(appt);
+        setBookingLoading(false);
+
+        if (!ok) {
+          showToast("Failed to save. Please try again.","⚠");
+          return;
+        }
+
+        setAppointments(prev => [...prev, appt]);
+        setLastAppt(appt);
+        setBookStep(4);
+        showToast("Appointment confirmed! 🦷","✓");
+        // Launch confetti!
+        setTimeout(launchConfetti, 200);
+      };
+
+      const resetBooking = () => {
+        setBookStep(1); setSelDate(""); setSelTime(""); setSelService("");
+        setForm({ name:"", phone:"", email:"", notes:"" }); setFormErrors({}); setLastAppt(null);
+      };
+
+      const navLinks = [["home","Home"],["services","Services"],["book","Book"],["contact","Contact"]];
+
+      // ── ADMIN ROUTE ──
+      if (page === "admin") {
+        if (!session) return (
+          <>
+            <style>{css}</style>
+            <AdminLogin onSuccess={s => setSessionState(s)}/>
+            {toast && <div className="toast"><span className="toast-icon">{toast.icon}</span>{toast.msg}</div>}
+          </>
+        );
+        return (
+          <>
+            <style>{css}</style>
+            <AdminPanel
+              session={session} onLogout={handleLogout}
+              appointments={appointments} setAppointments={setAppointments}
+              services={services} setServices={setServices}
+              timeSlots={timeSlots} setTimeSlots={setTimeSlots}
+              showToast={showToast} loadingAppts={loadingAppts}/>
+            {toast && <div className="toast"><span className="toast-icon">{toast.icon}</span>{toast.msg}</div>}
+          </>
+        );
+      }
+
+      // ── PUBLIC SITE ──
+      return (
+        <>
+          <style>{css}</style>
+          <canvas id="confetti-canvas"/>
+
+          {/* NAV */}
+          <nav className={`nav${scrolled?" scrolled":""}`}>
+            <div className="nav-logo" onClick={() => navTo("home")}>Alpha<span>Clinic</span></div>
+            <div className="nav-links">
+              {navLinks.map(([p,l]) => (
+                <button key={p} className={`nav-link${page===p?" active":""}`} onClick={() => navTo(p)}>{l}</button>
+              ))}
+              <button className="nav-cta" onClick={() => navTo("book")}>Book Now</button>
+            </div>
+            <button className={`nav-hamburger${menuOpen?" open":""}`} onClick={() => setMenuOpen(o=>!o)} aria-label="Menu">
+              <span/><span/><span/>
+            </button>
+          </nav>
+
+          <div className={`nav-mobile-menu${menuOpen?" open":""}`}>
+            {navLinks.map(([p,l]) => (
+              <button key={p} className={`nav-mobile-link${page===p?" active":""}`} onClick={() => navTo(p)}>{l}</button>
+            ))}
+            <button className="nav-mobile-cta" onClick={() => navTo("book")}>Book Appointment →</button>
+          </div>
+
+          {/* HOME */}
+          {page === "home" && (
+            <>
+              <section className="hero">
+                <div className="hero-content">
+                  <div className="hero-badge">Pakistan's Premier Dental Care</div>
+                  <h1>Your Smile,<br/><em>Perfected.</em></h1>
+                  <p>World-class dental care with precision technology and a gentle touch — because your smile deserves nothing less.</p>
+                  <div className="hero-actions">
+                    <button className="btn-primary" onClick={() => navTo("book")}>Book Appointment →</button>
+                    <button className="btn-outline" onClick={() => navTo("services")}>Our Services</button>
+                  </div>
+                  <div className="hero-stats">
+                    {[["2,400+","Happy Patients"],["12+","Years of Excellence"],["6","Specialisations"],["99%","Satisfaction"]].map(([n,l]) => (
+                      <div key={l}>
+                        <div className="stat-num">{n}</div>
+                        <div className="stat-label">{l}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="hero-visual">
+                  <div style={{ position:"relative", width:320, height:320 }}>
+                    <div className="orbit-ring"><div className="orbit-dot"/></div>
+                    <div className="orbit-ring"><div className="orbit-dot"/></div>
+                    <ToothSVG/>
+                  </div>
+                </div>
+              </section>
+
+              <section className="services-section">
+                <div className="services-header">
+                  <div className="section-badge">What We Offer</div>
+                  <h2 className="section-title">Comprehensive <em>Dental Care</em></h2>
+                  <p className="section-sub">From routine check-ups to complete smile transformations.</p>
+                </div>
+                <div className="services-grid">
+                  {services.map(s => (
+                    <div key={s.id} className="service-card" onClick={() => navTo("services")}>
+                      <div className="service-icon" style={{ background:s.color }}>{s.icon}</div>
+                      <h3>{s.title}</h3>
+                      <div className="service-tagline">{s.tagline}</div>
+                      <p className="service-desc">{s.desc}</p>
+                      <div className="service-meta">
+                        <span className="meta-pill">⏱ {s.duration}</span>
+                        <span className="meta-pill">{s.price}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
+              <section className="about-section">
+                <div className="about-inner">
+                  <div className="about-visual">
+                    <div className="about-3d-inner">
+                      <div className="big-tooth-icon">🦷</div>
+                      <p style={{ color:"var(--g)", fontFamily:"var(--font-display)", fontSize:"1.15rem", marginTop:14, fontStyle:"italic" }}>Excellence in Every Detail</p>
+                    </div>
+                    <div className="about-badges">
+                      {[["ISO","Certified"],["24/7","Support"],["HD","X-Ray"]].map(([n,l]) => (
+                        <div key={l} className="about-badge">
+                          <div className="about-badge-num">{n}</div>
+                          <div className="about-badge-lbl">{l}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="section-badge">Our Mission</div>
+                    <h2 className="section-title">Why Choose <em>Alpha Clinic</em></h2>
+                    <p className="section-sub" style={{ marginBottom:32 }}>Trusted by thousands of families across Lahore for over a decade of exceptional dental care.</p>
+                    <ul className="feature-list">
+                      {[
+                        ["Advanced Technology","Digital X-rays, 3D scanning, and laser dentistry for the most accurate diagnoses."],
+                        ["Expert Specialists","Our team of board-certified dentists brings decades of combined experience."],
+                        ["Gentle & Compassionate","We ensure every patient feels comfortable and cared for throughout their visit."],
+                        ["Transparent Pricing","No hidden fees. Clear treatment plans before we begin any procedure."],
+                      ].map(([h,d]) => (
+                        <li key={h} className="feature-item">
+                          <div className="feature-check">✓</div>
+                          <div className="feature-text"><h4>{h}</h4><p>{d}</p></div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              </section>
+            </>
+          )}
+
+          {/* SERVICES */}
+          {page === "services" && (
+            <div style={{ paddingTop:"var(--nav-h)" }}>
+              <section style={{ background:"linear-gradient(135deg,var(--g3),var(--g4))", padding:"64px 20px", textAlign:"center" }}>
+                <div className="section-badge">What We Offer</div>
+                <h1 className="section-title">Our <em>Services</em></h1>
+                <p className="section-sub" style={{ margin:"0 auto", maxWidth:480 }}>Comprehensive dental care under one roof.</p>
+              </section>
+              <section className="services-section">
+                <div className="services-grid" style={{ maxWidth:1200, margin:"0 auto" }}>
+                  {services.map(s => (
+                    <div key={s.id} className="service-card">
+                      <div className="service-icon" style={{ background:s.color }}>{s.icon}</div>
+                      <h3>{s.title}</h3>
+                      <div className="service-tagline">{s.tagline}</div>
+                      <p className="service-desc">{s.desc}</p>
+                      <div className="service-meta">
+                        <span className="meta-pill">⏱ {s.duration}</span>
+                        <span className="meta-pill">{s.price}</span>
+                      </div>
+                      <button className="btn-primary" style={{ marginTop:20, width:"100%", justifyContent:"center" }} onClick={() => navTo("book")}>
+                        Book Now →
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            </div>
+          )}
+
+          {/* BOOK */}
+          {page === "book" && (
+            <div style={{ paddingTop:"var(--nav-h)" }}>
+              <section style={{ background:"linear-gradient(135deg,var(--g3),var(--g4))", padding:"64px 20px", textAlign:"center" }}>
+                <div className="section-badge">Easy Online Booking</div>
+                <h1 className="section-title">Book Your <em>Appointment</em></h1>
+                <p className="section-sub" style={{ margin:"0 auto", maxWidth:480 }}>Choose your preferred date, time and service in just a few steps.</p>
+              </section>
+
+              <section className="booking-section">
+                <div className="booking-inner">
+                  <div className="booking-card">
+                    <div className="booking-steps">
+                      {[["1","Service"],["2","Date & Time"],["3","Details"],["4","Confirmed"]].map(([n,l],i) => (
+                        <React.Fragment key={n}>
+                          <div className={`step${bookStep >= parseInt(n) ? " active" : ""}`}>
+                            <div className="step-num">{bookStep > parseInt(n) ? "✓" : n}</div>
+                            <span className="step-label">{l}</span>
+                          </div>
+                          {i < 3 && <div className="step-divider"/>}
+                        </React.Fragment>
+                      ))}
+                    </div>
+
+                    {/* STEP 1 */}
+                    {bookStep === 1 && (
+                      <div>
+                        <h3 style={{ fontFamily:"var(--font-display)", fontSize:"1.5rem", fontWeight:400, marginBottom:8 }}>Select a Service</h3>
+                        <p style={{ color:"var(--muted)", fontSize:".88rem", marginBottom:24, fontWeight:300 }}>Choose the treatment you'd like to book for.</p>
+                        <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+                          {services.map(s => (
+                            <div key={s.id}
+                              onClick={() => setSelService(s.title)}
+                              style={{ padding:"16px 20px", border:`2px solid ${selService===s.title?"var(--g)":"var(--border)"}`, borderRadius:14, cursor:"pointer", display:"flex", alignItems:"center", gap:14, background:selService===s.title?"var(--g3)":"var(--w)", transition:"all .2s" }}>
+                              <div style={{ width:42,height:42,borderRadius:12,background:s.color,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"1.1rem",flexShrink:0 }}>{s.icon}</div>
+                              <div style={{ flex:1 }}>
+                                <div style={{ fontWeight:500, fontSize:".92rem" }}>{s.title}</div>
+                                <div style={{ fontSize:".78rem", color:"var(--muted)" }}>{s.duration} · {s.price}</div>
+                              </div>
+                              {selService === s.title && <div style={{ width:20,height:20,borderRadius:"50%",background:"var(--g)",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:".65rem",flexShrink:0 }}>✓</div>}
+                            </div>
+                          ))}
+                        </div>
+                        <button className="btn-primary" style={{ width:"100%", justifyContent:"center", marginTop:24 }}
+                          onClick={() => { if(!selService){showToast("Please select a service","⚠");return;} setBookStep(2); }}
+                          disabled={!selService}>
+                          Continue →
+                        </button>
+                      </div>
+                    )}
+
+                    {/* STEP 2 */}
+                    {bookStep === 2 && (
+                      <div>
+                        <h3 style={{ fontFamily:"var(--font-display)", fontSize:"1.5rem", fontWeight:400, marginBottom:8 }}>Choose Date & Time</h3>
+                        <p style={{ color:"var(--muted)", fontSize:".88rem", marginBottom:24, fontWeight:300 }}>Select an available slot for your visit.</p>
+                        <Calendar selectedDate={selDate} onSelect={d => { setSelDate(d); setSelTime(""); }} bookedSlots={bookedSlots}/>
+                        {selDate && (
+                          <div style={{ marginTop:24 }}>
+                            <div style={{ fontSize:".85rem", fontWeight:500, marginBottom:12, color:"var(--muted)" }}>Available times for {formatDate(selDate)}</div>
+                            <div className="time-grid">
+                              {timeSlots.map(t => (
+                                <div key={t}
+                                  className={`time-slot${selTime===t?" selected":""}${isSlotBooked(selDate,t)?" booked":""}`}
+                                  onClick={() => !isSlotBooked(selDate,t) && setSelTime(t)}>
+                                  {t}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        <div style={{ display:"flex", gap:10, marginTop:24 }}>
+                          <button className="btn-outline" style={{ padding:"12px 20px", fontSize:".875rem" }} onClick={() => setBookStep(1)}>← Back</button>
+                          <button className="btn-primary" style={{ flex:1, justifyContent:"center" }}
+                            onClick={() => { if(!selDate){showToast("Please select a date","⚠");return;} if(!selTime){showToast("Please select a time","⚠");return;} setBookStep(3); }}
+                            disabled={!selDate||!selTime}>
+                            Continue →
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* STEP 3 */}
+                    {bookStep === 3 && (
+                      <div>
+                        <h3 style={{ fontFamily:"var(--font-display)", fontSize:"1.5rem", fontWeight:400, marginBottom:8 }}>Your Details</h3>
+                        <p style={{ color:"var(--muted)", fontSize:".88rem", marginBottom:24, fontWeight:300 }}>Please fill in your contact information.</p>
+
+                        <div style={{ background:"var(--g3)", borderRadius:12, padding:"14px 18px", marginBottom:24, border:"1px solid var(--g4)" }}>
+                          <div style={{ fontSize:".8rem", color:"var(--muted)", fontWeight:500 }}>Booking Summary</div>
+                          <div style={{ fontSize:".9rem", fontWeight:500, marginTop:4 }}>
+                            {selService} · {formatDate(selDate)} at {selTime}
+                          </div>
+                        </div>
+
+                        <div className="form-grid" style={{ marginBottom:16 }}>
+                          <div className="form-group full">
+                            <label className="form-label">Full Name <span>*</span></label>
+                            <input className={`form-input${formErrors.name?" error":""}`} placeholder="e.g. Ahmed Khan"
+                              value={form.name} maxLength={100}
+                              onChange={e => { setForm({...form,name:e.target.value}); setFormErrors({...formErrors,name:""}); }}/>
+                            {formErrors.name && <p className="form-error">{formErrors.name}</p>}
+                          </div>
+                          <div className="form-group">
+                            <label className="form-label">Phone Number <span>*</span></label>
+                            <input className={`form-input${formErrors.phone?" error":""}`} placeholder="+92 3XX XXXXXXX"
+                              value={form.phone} type="tel" maxLength={15}
+                              onChange={e => { setForm({...form,phone:e.target.value}); setFormErrors({...formErrors,phone:""}); }}/>
+                            {formErrors.phone && <p className="form-error">{formErrors.phone}</p>}
+                          </div>
+                          <div className="form-group">
+                            <label className="form-label">Email <span style={{ color:"var(--muted)", fontWeight:300 }}>(optional)</span></label>
+                            <input className={`form-input${formErrors.email?" error":""}`} placeholder="you@example.com"
+                              value={form.email} type="email" maxLength={255}
+                              onChange={e => { setForm({...form,email:e.target.value}); setFormErrors({...formErrors,email:""}); }}/>
+                            {formErrors.email && <p className="form-error">{formErrors.email}</p>}
+                          </div>
+                          <div className="form-group full">
+                            <label className="form-label">Notes <span style={{ color:"var(--muted)", fontWeight:300 }}>(optional)</span></label>
+                            <textarea className="form-textarea" placeholder="Any specific concerns or requests…"
+                              value={form.notes} maxLength={500}
+                              onChange={e => setForm({...form,notes:e.target.value})}/>
+                            <p className="form-hint">{form.notes.length}/500 characters</p>
+                          </div>
+                        </div>
+                        <div style={{ display:"flex", gap:10, marginTop:8 }}>
+                          <button className="btn-outline" style={{ padding:"12px 20px", fontSize:".875rem" }} onClick={() => setBookStep(2)}>← Back</button>
+                          <button className="btn-primary" style={{ flex:1, justifyContent:"center", padding:14 }}
+                            onClick={handleBook} disabled={bookingLoading}>
+                            {bookingLoading ? <><span className="spinner"/>Saving…</> : "Confirm Appointment ✓"}
+                          </button>
+                        </div>
+                        <p style={{ fontSize:".72rem", color:"var(--muted)", textAlign:"center", marginTop:12 }}>
+                          Your data is stored securely and never shared with third parties.
+                        </p>
+                      </div>
+                    )}
+
+                    {/* STEP 4: SUCCESS */}
+                    {bookStep === 4 && lastAppt && (
+                      <div className="booking-success">
+                        <span className="success-icon">🎉</span>
+                        <h3>You're All Set!</h3>
+                        <p style={{ color:"var(--muted)", marginBottom:0 }}>Your appointment has been confirmed and saved. See you soon!</p>
+                        <div className="appt-summary">
+                          {[["Patient",lastAppt.name],["Date",formatDate(lastAppt.date)],["Time",lastAppt.time],["Service",lastAppt.service||"General"],["Phone",lastAppt.phone],["Status","Confirmed ✓"]].map(([l,v]) => (
+                            <div key={l} className="appt-summary-item">
+                              <span className="appt-summary-lbl">{l}</span>
+                              <span className="appt-summary-val">{v}</span>
+                            </div>
+                          ))}
+                        </div>
+                        <a className="whatsapp-btn"
+                          href={`https://wa.me/${WHATSAPP_NUMBER}?text=Hi%2C+I+just+booked+at+Alpha+Clinic+for+${encodeURIComponent(formatDate(lastAppt.date))}+at+${encodeURIComponent(lastAppt.time)}.+My+name+is+${encodeURIComponent(lastAppt.name)}.`}
+                          target="_blank" rel="noopener noreferrer">
+                          <WASvg/> Confirm via WhatsApp
+                        </a>
+                        <button className="btn-outline" style={{ width:"100%", justifyContent:"center" }} onClick={resetBooking}>
+                          Book Another Appointment
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </section>
+            </div>
+          )}
+
+          {/* CONTACT */}
+          {page === "contact" && (
+            <div style={{ paddingTop:"var(--nav-h)" }}>
+              <section style={{ background:"linear-gradient(135deg,var(--g3),var(--g4))", padding:"64px 20px", textAlign:"center" }}>
+                <div className="section-badge">Get In Touch</div>
+                <h1 className="section-title">Contact <em>Alpha Clinic</em></h1>
+                <p className="section-sub" style={{ margin:"0 auto", maxWidth:480 }}>We're here to help — reach out via WhatsApp for the fastest response.</p>
+              </section>
+              <section className="contact-section">
+                <div className="contact-inner">
+                  <div>
+                    <div className="section-badge">Direct Contact</div>
+                    <h2 className="section-title" style={{ fontSize:"clamp(1.6rem,4vw,2rem)" }}>We're <em>Here for You</em></h2>
+                    <a className="whatsapp-btn" href={`https://wa.me/${WHATSAPP_NUMBER}?text=Hello%2C+I+would+like+to+enquire+about+your+dental+services.`} target="_blank" rel="noopener noreferrer">
+                      <WASvg/>
+                      <div>
+                        <div style={{ fontSize:"1rem" }}>Chat on WhatsApp</div>
+                        <div style={{ fontSize:".78rem", opacity:.85 }}>+92 314 843 3928 — Fastest Response</div>
+                      </div>
+                    </a>
+                    {[
+                      { icon:"📍", bg:"#e8f5e9", title:"Address", text:"Alpha Clinic, Main Boulevard\nLahore, Pakistan" },
+                      { icon:"📞", bg:"#e3f2fd", title:"Phone", text:"+92 314 843 3928\nMon–Sat, 9 AM – 6 PM" },
+                      { icon:"🕐", bg:"#fff8e1", title:"Hours", text:"Monday – Saturday: 9:00 AM – 6:00 PM\nSunday: Emergency Only" },
+                      { icon:"📧", bg:"#fce4ec", title:"Email", text:"info@alphaclinic.pk\nReply within 24 hours" },
+                    ].map(c => (
+                      <div key={c.title} className="contact-card">
+                        <div className="contact-icon" style={{ background:c.bg }}>{c.icon}</div>
+                        <div className="contact-detail"><h4>{c.title}</h4><p style={{ whiteSpace:"pre-line" }}>{c.text}</p></div>
+                      </div>
+                    ))}
+                  </div>
+                  <div>
+                    <div className="section-badge">Find Us</div>
+                    <h2 className="section-title" style={{ fontSize:"clamp(1.6rem,4vw,2rem)" }}>Our <em>Location</em></h2>
+                    <div className="map-container">
+                      <iframe className="map-iframe"
+                        src="https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d217816.58027882327!2d74.12390715!3d31.5203696!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x39190483e58107d9%3A0xc23abe6ccc7e2462!2sLahore%2C+Punjab%2C+Pakistan!5e0!3m2!1sen!2s!4v1700000000000!5m2!1sen!2s"
+                        allowFullScreen loading="lazy" referrerPolicy="no-referrer-when-downgrade" title="Alpha Clinic Location"/>
+                      <div className="map-overlay"><p>📍 Alpha Clinic</p><span>Main Boulevard, Lahore</span></div>
+                    </div>
+                    <div style={{ marginTop:20, background:"var(--w)", borderRadius:"var(--r)", padding:24, border:"1px solid var(--border)" }}>
+                      <h4 style={{ fontFamily:"var(--font-display)", fontSize:"1.25rem", fontWeight:400, marginBottom:10 }}>Quick Booking</h4>
+                      <p style={{ color:"var(--muted)", fontSize:".84rem", marginBottom:16, fontWeight:300 }}>Book your appointment online in under 2 minutes.</p>
+                      <button className="btn-primary" style={{ width:"100%", justifyContent:"center" }} onClick={() => navTo("book")}>Book Appointment →</button>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            </div>
+          )}
+
+          {/* FOOTER */}
+          <footer>
+            <div className="footer-inner">
+              <div className="footer-top">
+                <div>
+                  <div className="footer-logo">Alpha<span>Clinic</span></div>
+                  <p className="footer-desc">Pakistan's premier dental clinic — delivering world-class care with compassion and precision since 2012.</p>
+                </div>
+                <div>
+                  <h4>Navigate</h4>
+                  <ul className="footer-links">
+                    {[["home","Home"],["services","Services"],["book","Book Appointment"],["contact","Contact"]].map(([p,l]) => (
+                      <li key={p} onClick={() => navTo(p)}>{l}</li>
+                    ))}
+                  </ul>
+                </div>
+                <div>
+                  <h4>Services</h4>
+                  <ul className="footer-links">
+                    {services.map(s => <li key={s.id} onClick={() => navTo("services")}>{s.title}</li>)}
+                  </ul>
+                </div>
+              </div>
+              <div className="footer-bottom">
+                <p>© {new Date().getFullYear()} Alpha Clinic. All rights reserved.</p>
+                <span style={{ cursor:"pointer", color:"rgba(255,255,255,.35)", fontSize:".72rem" }} onClick={() => navTo("admin")}>
+                  Staff Portal
+                </span>
+              </div>
+            </div>
+          </footer>
+
+          {/* DB MODE INDICATOR */}
+          <div className={`db-banner ${DB_MODE?"live":"local"}`}>
+            <div className="db-dot"/>
+            {DB_MODE ? "Live Database" : "Local Mode"}
+          </div>
+
+          {toast && <div className="toast"><span className="toast-icon">{toast.icon}</span>{toast.msg}</div>}
+        </>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(React.createElement(React.StrictMode, null, React.createElement(App)));
+  </script>
+</body>
+</html>
